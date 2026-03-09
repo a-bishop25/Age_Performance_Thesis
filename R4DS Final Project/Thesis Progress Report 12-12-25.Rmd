@@ -1,0 +1,1008 @@
+---
+title: "Thesis Tutorial Report"
+author: "Avery Bishop"
+date: "2025-12-16"
+output: pdf_document
+---
+
+```{r}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+library(Lahman)
+library(dplyr)
+library(mgcv)
+library(ggplot2)
+library(lubridate)
+library(survival)
+library(survminer)
+library(purrr)
+library(tidyr)
+library(tidyverse)
+library(splines)
+```
+
+# Age–Performance and Career Longevity in Major League Baseball: Progress Report
+
+## Executive Summary
+
+This project examines how age–performance curves in Major League Baseball have evolved in recent years, with particular attention to how career length, workload, and injuries shape player longevity. Rather than relying on traditional aging curves that average performance across players at each age, this work approaches aging as a dynamic process, where career outcomes depend on a player’s recent performance, durability, and cumulative usage over time.
+
+Using the Lahman baseball database as a foundation, player season data were constructed and reformatted to support longitudinal analysis. This involved addressing missing seasons, calculating offensive performance metrics, and restructuring careers into a survival analysis framework that allows for unequal career lengths and right-censoring. An external injury dataset was also merged to explore how injury timing and severity align with performance decline and career exit, though this integration remains a work in progress.
+
+Exploratory analysis and model development centered on Cox proportional hazards models, with nonlinear effects for age and interactions between age and career workload. Model comparisons showed that flexible specifications consistently outperformed linear age models, reinforcing the idea that aging in baseball is not uniform across players. Player level projections further illustrated how expected remaining career length evolves season by season, often shifting sharply following declines in performance, missed seasons, or reduced playing time.
+
+Several challenges remain, including fully resolving injury data mismatches, improving treatment of missing seasons, and properly accounting for the shortened 2020 season. Despite these limitations, the modeling framework developed here provides a strong foundation for the final thesis. It captures key features of career aging in professional baseball while remaining interpretable and extensible as data quality and model structure continue to improve.
+
+## Research Questions
+
+-   How have age–performance curves in Major League Baseball evolved over time, particularly in response to changes in typical career length, peak age, and performance expectations?
+
+-   To what extent have rising injury rates and increased physical demands, driven by the modern emphasis on velocity and power, altered age–performance trajectories and expectations of player productivity across the career span?
+
+-   How has the growing organizational emphasis on younger player acquisition and earlier professional entry (for example increased drafting of high school players) affected league wide age–performance curves and the valuation of age in player performance?
+
+## Data Sources
+
+This project combines several data sources to examine how player performance and career trajectories in Major League Baseball change with age. The goal is to bring together long-run performance records, injury information, and prior research in order to better understand how modern shifts in the game have affected expectations around age and longevity.
+
+### Lahman Baseball Database
+
+The core dataset used in this analysis is the Lahman Baseball Database, accessed through R. Lahman provides detailed season-level records for Major League players and serves as the foundation for constructing age and performance histories across careers. For this project, the People and Batting tables were merged to create player-year observations, allowing for the calculation of age and performance metrics over time. Pitching data are also being incorporated in order to correctly identify and exclude pitchers from the primary analytical sample, as the focus of this study is on position players rather than pitching performance.
+
+One important limitation of the Lahman database is that it does not include seasons in which a player did not record Major League statistics. As a result, years missed due to injury, extended time in the minor leagues, or other absences are not explicitly represented in the data. This omission complicates the construction of continuous career timelines and has direct implications for modeling age–performance curves, particularly later in a player’s career. Addressing this structural limitation became a central consideration in the methodological choices made throughout the project.
+
+### The Baseball Cube Data
+
+To capture the role of injuries in shaping age-related performance and career length, an external injury dataset was obtained from Baseball Cube through sponsor access. This data set provides information on injury occurrences and, in many cases, the reported severity of those injuries by player and season. The injury data are currently being merged with the Lahman player-year data set in order to construct injury indicators and severity measures that can be used as predictors in the modeling framework.
+
+Integrating injury data has proven to be nontrivial. Player name inconsistencies, ambiguous injury descriptions, and incomplete alignment between injury records and seasonal performance data introduce a number of challenges. Ongoing data cleaning efforts focus on resolving unmatched records and refining injury variables before they are fully incorporated into the final models.
+
+### External Literature and Reference Sources
+
+In addition to the empirical data sets, this project draws on existing literature related to age–performance curves, career longevity, and injury risk in professional baseball. These sources help frame the research questions, inform methodological decisions, and provide context for interpreting results.
+
+-   Baseball Prospectus. (n.d.). *The delta method revisited*. Baseball Prospectus.\
+    <https://www.baseballprospectus.com/news/article/59972/the-delta-method-revisited/>
+
+-   FanGraphs Community Research. (n.d.). *Joint model of the WAR aging curve*. FanGraphs.\
+    <https://community.fangraphs.com/joint-model-of-the-war-aging-curve/>
+
+-   Hartzell, M. (n.d.). *An update to MLB aging curves*. Medium.\
+    [https://medium.com/\@matthartzell/an-update-to-mlb-aging-curves-c9af4e475ae0](https://medium.com/@matthartzell/an-update-to-mlb-aging-curves-c9af4e475ae0)
+
+-   Monster Baseball. (2024, February 24). *Aging curves in professional baseball*. Monster Baseball.\
+    <https://monster-baseball.com/2024/02/24/aging-curves-in-pro-baseball/>
+
+-   Nguyen, Q. (2022). *Modeling aging and performance trajectories in Major League Baseball* [Conference paper]. Carnegie Mellon University Sports Analytics Conference.\
+    <https://www.stat.cmu.edu/cmsac/conference/2022/assets/pdf/QuangNguyen.pdf>
+
+-   Statcast. (n.d.). *Baseball Savant*. Major League Baseball.\
+    <http://baseballsavant.com>
+
+-   Baseball-Reference. (n.d.). *Daily batting WAR data*. Baseball-Reference.
+    <https://www.baseball-reference.com/data/war_daily_bat.txt>
+
+## Data Construction
+
+### DC1 Initial Assembly
+
+The first step in constructing the analytical data set was to merge performance records from the Lahman Batting table with biographical information from the People table. This allowed the calculation of player age for each season and the creation of basic performance measures such as plate appearances (PA), slugging percentage (SLG), isolated power (ISO), and weighted on-base average (wOBA). Early builds focused on restricting the sample to position players in the American and National Leagues with a minimum level of activity in a season (for example at least 200 plate appearances) and an age range of 18–42 years.
+
+```{r}
+#INITIAL ASSEMBLY
+Batting <- Lahman::Batting
+People <- Lahman::People
+# ---- Build dataset ----
+hit <- Batting %>%
+  filter(lgID %in% c("AL","NL")) %>%
+  left_join(People %>% select(playerID, birthYear, birthMonth, birthDay),
+            by="playerID") %>%
+  mutate(
+    birth_date = make_date(birthYear,
+                           pmax(1, birthMonth, na.rm=TRUE),
+                           pmax(1, birthDay, na.rm=TRUE)),
+    age = year(make_date(yearID, 7, 1)) - year(birth_date),
+    PA = AB + BB + HBP + SH + SF
+  ) %>%
+  filter(PA >= 200, between(age, 18, 42)) %>%
+  mutate(
+    SLG = (H + X2B + 2*X3B + 3*HR) / pmax(AB,1),
+    ISO = SLG - H / pmax(AB,1),
+    playerID = factor(playerID)   # ensure factor here
+  )
+```
+
+A small random sample of players was initially used to speed up exploratory modeling and visualization. For example, GAMs were fit with age as a smooth term and a random effect for player identity to capture individual-level variability in performance. These early models provided a first look at age-performance trends, though they were limited in scope due to sampling and missing data.
+
+```{r}
+# ---- take a smaller sample of players ----
+set.seed(123)
+n_players <- length(unique(hit$playerID))
+sample_size <- min(200, n_players)   # reduced to 200 for speed
+sampled_ids <- sample(unique(hit$playerID), sample_size, replace = FALSE)
+
+hit_sub <- hit %>%
+  filter(playerID %in% sampled_ids)
+
+# ---- Fit GAM age curve with random player effect ----
+m <- gam(ISO ~ s(age, k=10) + s(playerID, bs="re"),
+         data=hit_sub, method="REML", weights=PA)
+
+# ---- Predict curve ----
+# Use first player as dummy
+newdat <- data.frame(
+  age = seq(18, 42, by = 0.25),
+  playerID = factor(hit_sub$playerID[1], levels = levels(hit_sub$playerID))
+)
+
+pred <- predict(m, newdat, se.fit = TRUE, exclude = "s(playerID)")
+curve_df <- data.frame(
+  age = newdat$age,
+  ISO = pred$fit,
+  lo  = pred$fit - 2*pred$se.fit,
+  hi  = pred$fit + 2*pred$se.fit
+)
+
+
+# ---- Plot ----
+ggplot(curve_df, aes(x=age, y=ISO)) +
+  geom_line(color="blue", size=1.2) +
+  geom_ribbon(aes(ymin=lo, ymax=hi), fill="blue", alpha=0.2) +
+  labs(title="Mini Age-Performance Curve (ISO, 200 Sampled Players)",
+       x="Age", y="Isolated Power (ISO)") +
+  theme_minimal(base_size=14)
+
+```
+
+### DC2 Performance Metric Construction
+
+Multiple performance metrics were created to capture different aspects of offensive contributions. Beyond ISO, wOBA was calculated using a weighted combination of walks, hit-by-pitches, singles, doubles, triples, and home runs, following contemporary MLB weighting schemes. Singles were calculated as the difference between total hits and extra-base hits to ensure consistent component construction.
+
+```{r}
+#WOBA BUILDING
+# Build smaller dataset: pick 200 random players
+players_sample <- sample(unique(Batting$playerID), 200)
+hit <- Batting %>%
+  filter(playerID %in% players_sample, lgID %in% c("AL","NL")) %>%
+  left_join(People %>% select(playerID, birthYear, birthMonth, birthDay),
+            by="playerID") %>%
+  mutate(
+    birth_date = make_date(birthYear, pmax(1, birthMonth, na.rm=TRUE), pmax(1, birthDay, na.rm=TRUE)),
+    age = year(make_date(yearID, 7, 1)) - year(birth_date),
+    PA = AB + BB + HBP + SH + SF
+  ) %>%
+  filter(PA >= 200, between(age, 18, 42)) %>%
+  mutate(
+    # Compute wOBA using simplified 2023 MLB weights (adjust if needed)
+    wOBA = (0.69*BB + 0.72*HBP + 0.89*H + 1.27*X2B + 1.62*X3B + 2.10*HR) / PA
+  )
+```
+
+Additionally, external WAR data from Baseball Reference were incorporated to provide a supplementary measure of overall player value. WAR was merged with the Lahman Batting data on player, season, and team identifiers, though it was only used selectively in preliminary analysis due to partial coverage and some alignment issues.
+
+```{r}
+#WAR DATA
+download.file("https://www.baseball-reference.com/data/war_daily_bat.txt", destfile = "war_daily_bat.csv")
+war_data <- read.csv("war_daily_bat.csv")
+str(war_data)
+
+# Convert WAR to numeric
+war_data <- war_data %>%
+  mutate(WAR = as.numeric(WAR))
+
+# Merge with Lahman Batting data
+hit <- Batting %>%
+  filter(#playerID %in% sample(unique(Batting$playerID), 200),
+         lgID %in% c("AL","NL")) %>%
+  left_join(People %>% select(playerID, birthYear, birthMonth, birthDay),
+            by = "playerID") %>%
+  left_join(war_data %>% select(player_ID, year_ID, team_ID, WAR),
+            by = c("playerID" = "player_ID", "yearID" = "year_ID", "teamID" = "team_ID")) %>%
+  mutate(
+    birth_date = make_date(birthYear, pmax(1, birthMonth, na.rm = TRUE), pmax(1, birthDay, na.rm = TRUE)),
+    age = year(make_date(yearID, 7, 1)) - year(birth_date),
+    PA = AB + BB + HBP + SH + SF
+  ) %>%
+  filter(PA >= 200, between(age, 18, 42))
+
+# Fit GAM on reduced dataset
+m <- gam(WAR ~ s(age, k = 8), data = hit, method = "REML", weights = PA)
+
+# Predict curve
+newdat <- data.frame(age = seq(18, 42, by = 0.25))
+pred <- predict(m, newdat, se.fit = TRUE)
+curve_df <- data.frame(age = newdat$age, WAR = pred$fit,
+                       lo = pred$fit - 2 * pred$se.fit, hi = pred$fit + 2 * pred$se.fit)
+
+# Plot
+ggplot(curve_df, aes(x = age, y = WAR)) +
+  geom_line(color = "blue", size = 1.2) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), fill = "blue", alpha = 0.2) +
+  labs(title = "Mini Age-Performance Curve (WAR, sample of players)",
+       x = "Age", y = "WAR") +
+  theme_minimal(base_size = 14)
+```
+
+### DC3 Data Refinement
+
+One of the primary challenges in constructing the data set was the treatment of missing seasons. The Lahman database does not record years in which a player did not appear in Major League games, whether due to injury, minor league assignments, or other absences. To account for this, several strategies were implemented:
+
+-   Explicitly flagging gaps between consecutive seasons for each player.
+
+-   Creating lagged variables for performance metrics (e.g., lagged wOBA, plate appearances) to capture recent performance history.
+
+-   Constructing cumulative statistics such as total career plate appearances and games played to summarize career progression.
+
+```{r, include=FALSE}
+# Player-season dataset
+batting_data <- Batting %>%
+  left_join(People %>% select(playerID, birthYear, birthMonth, birthDay), by="playerID") %>%
+  mutate(
+    birth_date = make_date(birthYear, pmax(1, birthMonth, na.rm=TRUE), pmax(1, birthDay, na.rm=TRUE)),
+    age = year(make_date(yearID, 7, 1)) - year(birth_date),
+    PA = AB + BB + HBP + SH + SF,
+    wOBA = (0.69*BB + 0.72*HBP + 0.89*H + 1.27*X2B + 1.62*X3B + 2.10*HR) / pmax(PA,1),
+    BA = H / pmax(AB,1)
+  ) %>%
+  filter(PA >= 200, between(age, 18, 45))
+
+#PLAYER SURVIVAL
+batting_data <- batting_data %>%
+  group_by(playerID) %>%
+  arrange(yearID) %>%
+  mutate(next_year = lead(yearID),
+         survived_next_year = ifelse(!is.na(next_year),
+                                     1,
+                                     ifelse(yearID==2024,
+                                            1,
+                                            0))) %>%
+         
+  ungroup()
+
+head(batting_data %>% select(playerID, yearID, age, wOBA, survived_next_year))
+
+#AVG RETIREMENT AGE
+# Last season per player
+retirement_ages <- batting_data %>%
+  filter(survived_next_year == 0) %>%  # last observed season
+  select(playerID, age)
+
+
+
+#SURVIVAL PROPORTION
+survival_proportions <- tibble(age_cut = c(35, 40, 45)) %>%
+  mutate(proportion_surviving = map_dbl(age_cut, ~ mean(retirement_ages$age > .x)))
+```
+
+```{r}
+#KM DATA
+surv_data <- batting_data %>%
+  group_by(playerID) %>%
+  summarise(
+    start_age = min(age),
+    end_age = max(age),
+    retired = ifelse(survived_next_year[which.max(age)] == 0, 1, 0),  # 1 if retired at last season
+    .groups="drop"
+  )
+```
+
+```{r}
+# Build survival dataset (per player-season)
+survival_data <- batting_data %>%
+  group_by(playerID) %>%
+  arrange(yearID) %>%
+  mutate(
+    start     = age,
+    stop      = lead(age),                        # normal lead
+    stop      = if_else(is.na(stop), age + 1, stop),  # replace NA with age+1
+    event     = if_else(is.na(lead(yearID)), 1, 0),   # retired if no next season
+    lag_wOBA  = lag(wOBA),
+    lag_PA    = lag(PA),
+    #lag_WAR   = lag(WAR),            # performance quality
+    lag_G     = lag(G),              # durability
+    cum_PA    = cumsum(PA),
+    #cum_WAR   = cumsum(WAR),
+    injury    = if_else(G < 100, 1, 0) # crude injury proxy
+  ) %>%
+  ungroup() %>%
+  filter(stop > start)
+
+# Example player data
+example_player <- data.frame(
+  lag_wOBA = 0.350,
+  lag_PA   = 500,
+  lag_G   = 3000
+)
+
+# Drop rows with missing predictors FOR NOW
+survival_data_model <- survival_data %>%
+  filter(!is.na(lag_wOBA), !is.na(lag_PA))
+
+# Fit Cox model in counting-process style
+cox_model <- coxph(
+  Surv(start, stop, event) ~ lag_wOBA + lag_PA  + lag_G,
+    #age + injury,
+  data = survival_data_model
+)
+
+summary(cox_model)
+
+# Check proportional hazards assumption
+ph_test <- cox.zph(cox_model)
+print(ph_test)
+plot(ph_test)
+```
+
+These approaches allowed the data set to better reflect the discontinuities in player careers and informed subsequent survival analysis.
+
+### DC4 Data Scoping
+
+As the data set grew more complex, additional augmentations were necessary to support modeling and visualization:
+
+-   Players who played past age 40 were identified to examine late-career trends.
+
+-   Missing or inconsistent values in wOBA and other metrics were viewed carefully to avoid distortions in the analysis.
+
+-   Data were rearranged to include cumulative and lagged statistics across all seasons for each
+
+```{r}
+#PLAYERS OVER 40
+old_players <- batting_data %>%
+  group_by(playerID) %>%
+  filter(max(age) >= 40) %>%
+  ungroup()
+
+ggplot(old_players, aes(x=age,y=wOBA,group=playerID,color=playerID)) +
+  geom_line() +
+  labs(title="Players Who Played Past Age 40 (Career wOBA)",
+       x="Age", y="wOBA")
+```
+
+### DC5 Survival Data
+
+To support survival analysis of career length, the final data set was structured on a player-season basis. Key features include:
+
+-   start and stop variables representing the player’s time in the league (using age or years-in-league as the timescale).
+
+-   Lagged and cumulative performance measures (wOBA, plate appearances, games played) to serve as predictors.
+
+-   Event indicators for retirement (whether the player had a subsequent season recorded).
+
+-   Flags for gap years to capture discontinuities in careers.
+
+```{r}
+Batting <- Lahman::Batting
+People <- Lahman::People
+# ================================
+# 0. ENHANCE RAW BATTING DATA — KEEP ALL ROWS
+# ================================
+# --- Join People info and compute age for each season ---
+Batting <- Batting %>%
+  left_join(
+    People %>%
+      select(playerID, birthYear, birthMonth, birthDay, nameFirst, nameLast, bats, throws),
+    by = "playerID"
+  ) %>%
+  mutate(
+    # Estimate player age for that season
+    # (approximate, since we don’t have exact game date — assumes mid-season)
+    age = yearID - birthYear - ifelse(birthMonth > 7, 1, 0)
+  )
+# ---- Compute extra metrics ----
+Batting <- Batting %>%
+  mutate(
+    # Plate Appearances
+    PA = AB + BB + HBP + SF + SH,
+    
+    # Singles (1B)
+    X1B = H - X2B - X3B - HR,
+    
+    # Weighted On-Base Average (wOBA)
+    wOBA = (
+      (0.69 * (BB - ifelse(is.na(IBB), 0, IBB))) +
+      (0.72 * HBP) +
+      (0.89 * X1B) +
+      (1.27 * X2B) +
+      (1.62 * X3B) +
+      (2.10 * HR)
+    ) / (AB + BB - ifelse(is.na(IBB), 0, IBB) + SF + HBP)
+  ) %>%
+  mutate(
+    wOBA = ifelse(is.nan(wOBA) | is.infinite(wOBA), NA, wOBA)
+  )
+
+# ---- Build survival model structure ----
+survival_data_model2 <- Batting %>%
+  arrange(playerID, yearID) %>%
+  group_by(playerID) %>%
+  mutate(
+    years_in_league = row_number() - 1,  # start counting at 0
+    start = years_in_league,
+    stop  = years_in_league + 1,
+    
+    # Lag and cumulative stats
+    lag_wOBA = lag(wOBA, 1),
+    lag_PA   = lag(PA, 1),
+    lag_G    = lag(G, 1),
+    
+    career_PA = cumsum(lag(PA, default = 0)),
+    career_G  = cumsum(lag(G, default = 0)),
+
+    # Flag final available year
+    event = if_else(row_number() == n(), 1, 0),
+    
+    # Flag gap years
+    missed_prev_year = if_else(yearID - lag(yearID, default = first(yearID)) > 1, 1, 0)
+  ) %>%
+  ungroup()
+
+# # Replace NA wOBA with 0 only for modeling stability
+# survival_data_model2 <- survival_data_model2 %>%
+#   mutate(
+#     wOBA = ifelse(is.na(wOBA), 0, wOBA)
+#   )
+
+glimpse(survival_data_model2)
+saveRDS(survival_data_model2, "survival_data_model2.rds")
+
+```
+
+This final survival data set allowed for consistent modeling of career longevity while accounting for censoring, gaps in player careers, and variations in performance over time. By building the data in this structured way, it became possible to fit both Kaplan–Meier curves and Cox proportional hazards models with lagged predictors and covariates, setting the stage for the methodological analyses.
+
+### DC6 Injury Data Set Integration
+
+To incorporate injuries into the analysis, the survival dataset built from Lahman statistics was merged with an external injury dataset obtained for research purposes. The goal was to create a unified dataset that includes both player performance metrics and injury information, allowing injuries to be used as covariates in modeling career length and performance trajectories.
+
+```{r}
+injury_classified <- readRDS("data/injury_classified.rds")
+injury_merge <- injury_classified %>%
+  mutate(
+    firstname = str_to_lower(firstname),
+    lastname  = str_to_lower(lastname), 
+    injury_year = year(addDate),
+    bornyear = year(borndate)) %>%
+  select(firstname, lastname, injury_year, bornyear, status, notes, addDate, X40man, endDate, minorteam, level, injury_severity)
+
+
+modeling_data <- survival_data_model2 %>%
+  mutate(nameFirst = str_to_lower(nameFirst), 
+         nameLast = str_to_lower(nameLast))
+
+#trying to join by birthyear as well do get around people with the same name
+model_injury <- modeling_data %>%
+  left_join(injury_merge, by = c("nameFirst" = "firstname", "nameLast" = "lastname", "yearID" = "injury_year", "birthYear" = "bornyear"))
+
+head(model_injury)
+
+```
+
+A few complexities arose during this merge:
+
+-   Players who switch teams mid-season or appear on the injury list multiple times in a season generate many-to-many matches, triggering warnings in R.
+
+-   Some non-matches and N/A values remain, particularly for seasons with missing data or incomplete injury records.
+
+Despite these imperfections, this merged dataset allowed preliminary visualizations and modeling of injury impacts on player careers before more detailed cleaning. This process provides a practical way to connect performance and injury data while preserving the integrity of the Lahman dataset, forming the foundation for the survival and predictive modeling performed in later sections.
+
+An attempt to fix these inconsistencies across matches was made in order to ensure correct modeling data for career performance implications.
+
+```{r}
+unmatched_injuries <- injury_merge %>%
+  anti_join(
+    modeling_data,
+    by = c(
+      "firstname" = "nameFirst",
+      "lastname"  = "nameLast",
+      "injury_year" = "yearID",
+      "bornyear" = "birthYear"
+    )
+  )
+
+# How many didn't match?
+nrow(unmatched_injuries)
+
+# View first few unmatched rows
+head(unmatched_injuries)
+
+
+#FIXING MISMATCHINGS WITH 0 IMPUTATIONS
+# Create complete player-year panel
+player_year_panel <- survival_data_model2 %>%
+  group_by(playerID) %>%
+  summarize(
+    min_year = min(yearID),
+    max_year = max(yearID)
+  ) %>%
+  rowwise() %>%
+  mutate(yearID = list(seq(min_year, max_year))) %>%
+  unnest(yearID) %>%
+  select(playerID, yearID)
+
+lahman_expanded <- player_year_panel %>%
+  left_join(survival_data_model2,
+            by = c("playerID", "yearID"))
+
+counting_stats <- c(
+  "G","AB","R","H","X1B","X2B","X3B","HR","RBI","SB","CS",
+  "BB","SO","HBP","SH","SF","GIDP","PA"
+)
+
+lahman_expanded <- lahman_expanded %>%
+  mutate(across(all_of(counting_stats), ~ ifelse(is.na(.), 0, .)))
+injury_merge_clean <- injury_classified %>%
+  mutate(
+    firstname = str_to_lower(firstname),
+    lastname  = str_to_lower(lastname), 
+    injury_year = year(addDate),
+    bornyear = year(borndate)
+  )
+
+model_injury_expanded <- lahman_expanded %>%
+  left_join(injury_merge_clean,
+            by = c("nameFirst" = "firstname",
+                   "nameLast" = "lastname",
+                   "birthYear" = "bornyear",
+                   "yearID" = "injury_year"))
+
+```
+
+These unmatched rows were identified using an anti_join, which flags injury records for which no corresponding player, birth year, or season exists in the modeling data set. This step helped quantify the scope of mismatches and highlighted the need to account for missing player-season combinations in the data set.
+
+To address these gaps, a complete player-year panel was constructed. For each player, a sequence of all seasons between their first and last recorded Major League appearances was created, effectively filling in years where no statistics were recorded. This expanded panel allows for consistent longitudinal modeling, ensures that all potential seasons are represented, and provides a framework for incorporating injuries or missing data.
+
+Once the full panel was constructed, all standard counting statistics (games, plate appearances, hits, walks, etc.) were set to zero for seasons that were previously missing. This zero imputation ensures that missing values do not disrupt downstream calculations or survival modeling while maintaining the distinction between a truly inactive season and one where performance was simply minimal.
+
+## Exploratory Data Analysis
+
+### EDA1 Overview of Findings
+
+Exploratory analysis for this project was conducted in tandem with model development rather than as a standalone set of descriptive plots. Due to the longitudinal structure of player careers, unequal career lengths, and the presence of right-censoring for active players, traditional summary statistics or age-averaged performance plots were insufficient for capturing meaningful patterns. Instead, exploration focused on understanding how player performance, durability, workload, and age interact over time and influence the probability of career continuation. Early findings indicated that retirement risk increases nonlinearly with age, is strongly conditioned on recent performance and playing time, and varies substantially across players. These observations motivated the use of survival analysis as the primary analytical framework and guided subsequent model specification and refinement.
+
+### EDA2 Survival Model Specification and Fit Comparison
+
+Multiple Cox proportional hazards models were fit and compared to determine an appropriate functional form for modeling career survival. Initial specifications treated age as a linear predictor, but these models consistently underfit observed retirement behavior, particularly at early and late career stages. To address this, natural spline terms were introduced for age, allowing for flexible, nonlinear effects. Additional models incorporated interactions between age and cumulative career workload, as well as nonlinear transformations of career plate appearances.
+
+```{r}
+#Linear Baseline
+fit_linear <- coxph(Surv(start, stop, event) ~ age + lag_wOBA + lag_PA + lag_G, data = survival_data_model2)
+#Spline
+fit_spline <- coxph(Surv(start, stop, event) ~ ns(age,3) + lag_wOBA + lag_PA + lag_G, data = survival_data_model2)
+#interaction
+fit_interact <- coxph(Surv(start, stop, event) ~ ns(age,3) + lag_wOBA + lag_PA + lag_G + age*career_PA, data = survival_data_model2 %>%
+                        mutate(age = scale(age, scale = FALSE),
+                               career_PA = scale(career_PA, scale = FALSE)))
+#Spline + Interaction
+fit_complex <- coxph(Surv(start, stop, event) ~ ns(age,3)*career_PA + lag_wOBA + lag_PA + lag_G, data = survival_data_model2)
+
+fit_two_nonlinear <- fit_cox <- coxph(
+  Surv(start, stop, event) ~ 
+    ns(age, df = 3) + 
+    lag_wOBA + lag_PA + lag_G + ns(career_PA, df = 3),
+  data = survival_data_model2
+)
+
+fit_interact_nonlinear <- coxph(Surv(start, stop, event) ~lag_wOBA + lag_PA + lag_G + ns(age, df=3)*ns(career_PA, df=3), data = survival_data_model2)
+
+fit_linear_with_inter <- coxph(formula = Surv(start, stop, event) ~ lag_wOBA + 
+    lag_PA + lag_G + age * career_PA, data = survival_data_model2 %>% 
+    mutate(age = scale(age, scale = FALSE), career_PA = scale(career_PA, 
+        scale = FALSE)))
+
+fit_Inter_double <- coxph(Surv(start, stop, event) ~ ns(age,3) + ns(career_PA, 3) + lag_wOBA + lag_PA + lag_G + age*career_PA, data = survival_data_model2 %>%
+                        mutate(age = scale(age, scale = FALSE),
+                               career_PA = scale(career_PA, scale = FALSE)))
+
+AIC(fit_linear, fit_spline, fit_interact, fit_complex, fit_two_nonlinear, fit_interact_nonlinear, fit_linear_with_inter, fit_Inter_double)
+BIC(fit_linear, fit_spline, fit_interact, fit_complex, fit_two_nonlinear, fit_interact_nonlinear, fit_linear_with_inter, fit_Inter_double)
+anova(fit_interact, fit_linear_with_inter)
+
+summary(fit_cox)$concordance
+```
+
+Model performance was evaluated using AIC, BIC, likelihood ratio tests, and concordance statistics. Across all metrics, models allowing for nonlinear age effects and interactions with accumulated workload demonstrated improved fit without excessive complexity. These comparisons provided empirical justification for the final modeling structure and confirmed that retirement risk in baseball cannot be adequately described by linear age trends alone.
+
+### EDA3 Initial Modeling
+
+With the survival framework established, player-level career trajectories were examined using a counting-process Cox model. Each player’s career was represented as a sequence of annual intervals, with retirement defined as the final observed season. Lagged performance measures, durability metrics, and cumulative workload were incorporated to reflect the dynamic nature of player evaluation over time.
+
+```{r}
+survival_data_model2 <- survival_data_model %>%
+  arrange(playerID, yearID) %>%
+  group_by(playerID) %>%
+  mutate(
+    years_in_league = row_number() - 1,   # 0, 1, 2, ...
+    start = years_in_league,
+    stop  = years_in_league + 1
+  ) %>%
+  mutate(
+    #lag_wOBA = lag(wOBA, 1),
+    #lag_PA   = lag(PA, 1),
+    #lag_G    = lag(G, 1),
+    career_PA = cumsum(lag(PA, default = 0)),
+    career_G  = cumsum(lag(G, default = 0)),
+    career_wOBA = ifelse(career_PA > 0,
+                         cumsum(lag(wOBA * PA, default = 0)) / pmax(career_PA, 1),
+                         NA_real_),
+    wOBA_rolling3 = zoo::rollapply(lag(wOBA, 1), width = 3,
+                                   FUN = mean, align = "right", fill = NA)
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(lag_wOBA))
+
+# ================================
+# 2. FIT COX MODEL
+# ================================
+
+fit_cox <- coxph(
+  Surv(start, stop, event) ~ 
+    ns(age, df = 3) + 
+    lag_wOBA + lag_PA + lag_G + age*career_PA,
+  data = survival_data_model2
+)
+
+summary(fit_cox)
+cox.zph(fit_cox)  # check proportional hazards
+
+# ================================
+# 3. EXPECTED SURVIVAL TIME FUNCTION
+# ================================
+
+expected_survival_time <- function(surv_obj, max_quantile = 0.95) {
+  times <- surv_obj$time
+  surv  <- surv_obj$surv
+  if(length(times) < 2) return(0)
+  max_time <- quantile(times, probs = max_quantile, na.rm = TRUE)
+  idx <- which(times <= max_time)
+  if(length(idx) < 2) return(0)
+  times_sub <- times[idx]
+  surv_sub  <- surv[idx]
+  dt <- diff(c(0, times_sub))
+  auc <- sum(surv_sub * dt)
+  return(auc)
+}
+
+# ================================
+# 4. PREDICT FOR MULTIPLE PLAYERS
+# ================================
+
+players_to_plot <- c("aaronha01", "mayswi01", "troutmi01", "alonspe01", "forsylo01")  
+player_id = "troutmi01"
+for (player_id in players_to_plot) {
+  
+  cat("\n\n====================\n")
+  cat("Generating plots for:", player_id, "\n")
+  cat("====================\n")
+  
+  player_data <- survival_data_model2 %>%
+    filter(playerID == player_id) %>%
+    arrange(start) %>%
+    slice(-1)
+  
+  if (nrow(player_data) == 0) {
+    cat("No data found for", player_id, "\n")
+    next
+  }
+  
+  expected_remaining <- sapply(1:nrow(player_data), function(i) {
+    newrow <- player_data[i, , drop = FALSE]
+    sf <- survfit(fit_cox, newdata = newrow)
+    est <- expected_survival_time(sf)
+    est
+  })
+  
+  predicted_retirement_age <- player_data$age + expected_remaining
+  
+  results <- data.frame(
+    season_index = 1:nrow(player_data),
+    season = player_data$yearID,
+    current_age = player_data$age,
+    expected_remaining = expected_remaining,
+    predicted_retirement_age = predicted_retirement_age
+  )
+  
+  # ================================
+  # 5. PLOTS (same as your code)
+  # ================================
+  
+  # --- Predicted retirement age vs. current age ---
+  plot(results$current_age, results$predicted_retirement_age,
+       type = "b", pch = 19, col = "skyblue",
+       xlab = "Current Age",
+       ylab = "Predicted Retirement Age",
+       main = paste("Predicted Retirement Age vs Current Age for", player_id))
+  abline(0, 1, col = "red", lty = 2)
+  text(results$current_age, results$predicted_retirement_age + 0.3,
+       labels = round(results$expected_remaining, 1), cex = 0.7)
+  
+  # --- Expected years remaining (barplot) ---
+  barplot(results$expected_remaining,
+          names.arg = round(results$current_age, 0),
+          las = 2,
+          col = "skyblue",
+          main = paste("Predicted Remaining Career Length by Season for", player_id),
+          xlab = "Current Age",
+          ylab = "Expected Seasons Remaining")
+  abline(h = 0, col = "red", lty = 2)
+}
+
+```
+
+Using this model, expected remaining career length was computed for individual players at each season of their careers. These predictions were visualized as both expected remaining seasons and projected retirement age conditional on current age and performance. The resulting plots illustrated substantial heterogeneity across players, with elite performers showing relatively stable projections deep into their careers, while fringe players exhibited rapid declines in expected career length. These results reinforced the importance of player-specific trajectories and highlighted the limitations of population average aging curves.
+
+### EDA4 Predictor Effect Visualizaiton
+
+To interpret the fitted survival model beyond coefficient tables, marginal effect plots were generated for each major predictor. Holding all other variables constant at their median values, hazard ratios were computed across the observed range of age, recent performance, durability, and cumulative workload. These visualizations revealed clear nonlinear patterns, particularly for age and career plate appearances, and demonstrated how recent performance and games played reduce retirement risk.
+
+```{r}
+# ================================
+# Cox model + nonlinear effect plots for all predictors
+# ================================
+
+# --- 1. Fit Cox model (UNCHANGED)
+fit_cox <- coxph(
+  Surv(start, stop, event) ~ 
+    ns(age, df = 3) + 
+    lag_wOBA + lag_PA + lag_G + ns(career_PA, df = 3),
+  data = survival_data_model2
+)
+
+# --- 2. Store predictor names
+predictors <- c("age", "lag_wOBA", "lag_PA", "lag_G", "career_PA")
+
+# --- 3. Median values for holding others constant
+median_vals <- survival_data_model2 %>%
+  summarise(
+    age = median(age, na.rm = TRUE),
+    lag_wOBA = median(lag_wOBA, na.rm = TRUE),
+    lag_PA = median(lag_PA, na.rm = TRUE),
+    lag_G = median(lag_G, na.rm = TRUE),
+    career_PA = median(career_PA, na.rm = TRUE)
+  )
+
+# --- 4. Function to generate effect plot for a predictor
+plot_effect <- function(var_name) {
+
+  # Sequence for focal predictor
+  grid_vals <- seq(
+    min(survival_data_model2[[var_name]], na.rm = TRUE),
+    max(survival_data_model2[[var_name]], na.rm = TRUE),
+    length.out = 100
+  )
+
+  # Construct newdata holding others at median
+  newdata <- median_vals[rep(1, 100), ]
+  newdata[[var_name]] <- grid_vals
+
+  # Predict
+  linear_pred <- predict(
+    fit_cox,
+    newdata = newdata,
+    type = "lp",
+    se.fit = TRUE
+  )
+
+  plot_data <- data.frame(
+    x = grid_vals,
+    HR = exp(linear_pred$fit),
+    HR_upper = exp(linear_pred$fit + 1.96 * linear_pred$se.fit),
+    HR_lower = exp(linear_pred$fit - 1.96 * linear_pred$se.fit)
+  )
+
+  # Plot
+  ggplot(plot_data, aes(x = x, y = HR)) +
+    geom_line(color = "darkgreen", size = 1) +
+    geom_ribbon(
+      aes(ymin = HR_lower, ymax = HR_upper),
+      alpha = 0.2,
+      fill = "darkgreen"
+    ) +
+    labs(
+      x = var_name,
+      y = "Hazard Ratio",
+      title = paste("Effect of", var_name, "on Hazard of Retirement")
+    ) +
+    theme_minimal()
+}
+
+# --- 5. Generate plots for all predictors
+plots <- lapply(predictors, plot_effect)
+
+# Print plots
+for (p in plots) print(p)
+
+```
+
+The effect plots also helped validate model behavior against personal baseball intuition. For example, strong recent performance and consistent playing time were associated with lower hazard rates, while the marginal benefit of additional workload diminished later in a player’s career. These plots provided an interpretable link between model structure and real world player evaluation dynamics.
+
+### EDA5 Handling Missing Seasons and Lagged Performance
+
+A significant challenge in the exploratory phase involved handling missing seasons and undefined lagged variables, largely due to the structure of the Lahman dataset. Seasons with no recorded statistics are omitted entirely, leading to gaps in player histories and missing values for lagged predictors. To address this, lagged performance and durability measures were forward-filled within players, allowing the most recent available information to inform subsequent seasons.
+
+```{r, include=FALSE}
+Batting <- Lahman::Batting
+People <- Lahman::People
+# ================================
+# 0. ENHANCE RAW BATTING DATA — KEEP ALL ROWS
+# ================================
+# --- Join People info and compute age for each season ---
+Batting <- Batting %>%
+  left_join(
+    People %>%
+      select(playerID, birthYear, birthMonth, birthDay, nameFirst, nameLast, bats, throws),
+    by = "playerID"
+  ) %>%
+  mutate(
+    # Estimate player age for that season
+    # (approximate, since we don’t have exact game date — assumes mid-season)
+    age = yearID - birthYear - ifelse(birthMonth > 7, 1, 0)
+  )
+# ---- Compute extra metrics ----
+Batting <- Batting %>%
+  mutate(
+    # Plate Appearances
+    PA = AB + BB + HBP + SF + SH,
+    
+    # Singles (1B)
+    X1B = H - X2B - X3B - HR,
+    
+    # Weighted On-Base Average (wOBA)
+    wOBA = (
+      (0.69 * (BB - ifelse(is.na(IBB), 0, IBB))) +
+      (0.72 * HBP) +
+      (0.89 * X1B) +
+      (1.27 * X2B) +
+      (1.62 * X3B) +
+      (2.10 * HR)
+    ) / (AB + BB - ifelse(is.na(IBB), 0, IBB) + SF + HBP)
+  ) %>%
+  mutate(
+    wOBA = ifelse(is.nan(wOBA) | is.infinite(wOBA), NA, wOBA)
+  )
+
+# ---- Build survival model structure ----
+survival_data_model2 <- Batting %>%
+  arrange(playerID, yearID) %>%
+  group_by(playerID) %>%
+  mutate(
+    years_in_league = row_number() - 1,  # start counting at 0
+    start = years_in_league,
+    stop  = years_in_league + 1,
+    
+    # Lag and cumulative stats
+    lag_wOBA = lag(wOBA, 1),
+    lag_PA   = lag(PA, 1),
+    lag_G    = lag(G, 1),
+    
+    career_PA = cumsum(lag(PA, default = 0)),
+    career_G  = cumsum(lag(G, default = 0)),
+
+    # Flag final available year
+    event = if_else(row_number() == n(), 1, 0),
+    
+    # Flag gap years
+    missed_prev_year = if_else(yearID - lag(yearID, default = first(yearID)) > 1, 1, 0)
+  ) %>%
+  ungroup()
+
+```
+
+
+```{r}
+
+# For each player, fill NA lag values with the most recent non-missing lag
+survival_data_imputed <- survival_data_model2 %>%
+  arrange(playerID, yearID) %>%
+  group_by(playerID) %>%
+  fill(lag_wOBA, .direction = "down") %>%
+  fill(lag_PA,   .direction = "down") %>%
+  fill(lag_G,    .direction = "down") %>%
+  ungroup()
+
+# Fit Cox model with interactions
+fit_cox_imputed <- coxph(
+  Surv(start, stop, event) ~ 
+    ns(age, df = 3) +
+    lag_wOBA + lag_PA + lag_G + age * career_PA +
+    lag_G * missed_prev_year + 
+    lag_wOBA * missed_prev_year,
+  data = survival_data_imputed
+)
+
+# Plot predictions for selected players
+players_to_plot <- c("aaronha01", "mayswi01", "troutmi01", "alonspe01")
+
+for (player_id in players_to_plot) {
+  
+  player_data <- survival_data_imputed %>%
+    filter(playerID == player_id) %>%
+    arrange(start)
+  
+  if (nrow(player_data) == 0) next
+  
+  # Replace any remaining NA with 0 (rare, only if first career year is missing)
+  player_data <- player_data %>%
+    mutate(across(c(lag_wOBA, lag_PA, lag_G, career_PA, missed_prev_year),
+                  ~ ifelse(is.na(.), 0, .)))
+  
+  expected_remaining <- sapply(1:nrow(player_data), function(i) {
+    newrow <- player_data[i, , drop = FALSE]
+    sf <- tryCatch(survfit(fit_cox_imputed, newdata = newrow), error = function(e) NULL)
+    if (is.null(sf)) return(0)
+    expected_survival_time(sf)
+  })
+  
+  results <- data.frame(
+    season = player_data$yearID,
+    expected_remaining = expected_remaining,
+    missed_prev_year = player_data$missed_prev_year
+  )
+  
+  bar_cols <- ifelse(results$missed_prev_year == 1, "tomato", "skyblue")
+  
+  barplot(results$expected_remaining,
+          names.arg = results$season,
+          las = 2,
+          col = bar_cols,
+          main = paste("Predicted Remaining Career (Imputed Lags: Player-Specific) —", player_id),
+          xlab = "Season",
+          ylab = "Expected Seasons Remaining")
+  abline(h = 0, col = "red", lty = 2)
+  legend("topright", legend = c("Normal Season", "Missed Prior Year"),
+         fill = c("skyblue", "tomato"), bty = "n")
+}
+
+```
+
+Additionally, an explicit indicator for missed prior seasons was included and interacted with key predictors. This approach allowed the model to distinguish between continuous careers and those interrupted by absences, rather than treating missingness as random noise. Exploratory plots comparing projections with and without imputation demonstrated that missed seasons meaningfully alter expected career length, particularly for older players. These results underscored the importance of explicitly modeling gaps rather than ignoring them.
+
+### EDA6 Injury Merge and Exploratory Patterns
+
+Injury data were incorporated to explore how physical setbacks align with observed performance decline and career exit. After merging injury records with the survival dataset, exploratory plots were constructed to examine injury severity distributions over time and across player ages. These visualizations showed that injuries are not uniformly distributed, with higher frequencies and severities appearing in later career stages.
+
+```{r}
+#make the model meaningful without the thousands of na for seasons w/out injury
+model_plot <- model_injury %>%
+  filter(!is.na(injury_severity))
+
+ggplot(model_plot, aes(x = yearID, fill = injury_severity)) +
+  geom_bar(position = "stack") +
+  labs(title = "Injury Severity by Year", x = "Season", y = "Count") 
+
+ggplot(model_plot, aes(x = age, fill = injury_severity)) +
+  geom_histogram(position = "stack") +
+  labs(title = "Injury Severity by Age", x = "Player Age", y = "Count") 
+
+```
+
+While the injury data remain imperfect and incomplete, the exploratory patterns supported the hypothesis that injuries play a meaningful role in shaping age-performance curves and retirement risk. These findings motivated the inclusion of injury-related indicators in future model iterations and highlighted the need for careful treatment of injury timing and severity in longitudinal analyses.
+
+## Results
+
+This study finds that age–performance relationships in Major League Baseball are best understood through a dynamic, survival based framework rather than static aging curves. Across all model specifications, retirement risk increases nonlinearly with age, with the steepest increases occurring in the later stages of a player’s career. However, age alone does not determine career continuation. Recent offensive performance, durability, and accumulated workload meaningfully modify the effect of age, resulting in substantial heterogeneity across player trajectories.
+
+Player level projections reveal that expected remaining career length evolves season by season as new information becomes available. Players with sustained performance and consistent playing time maintain relatively stable survival expectations even at older ages, while declines in performance or interruptions due to missed seasons correspond to sharp increases in retirement hazard. Interaction effects between age and cumulative workload indicate that high-usage players experience aging differently than those with lighter career totals, suggesting that durability and career management play a critical role in shaping longevity.
+
+Model comparison results further demonstrate that flexible, nonlinear specifications provide a substantially better fit than linear age models, both in terms of information criteria and predictive discrimination. Visualization of predictor effects confirms that the fitted models align with baseball intuition, capturing diminishing returns to workload, nonlinear aging effects, and the protective influence of recent performance. Although injury data were not fully integrated into the final predictive model, exploratory analysis indicates that injuries are more prevalent and severe at later career stages, reinforcing their relevance to observed age-performance patterns.
+
+## Limitations
+
+Several limitations should be noted when interpreting these results. First, the Lahman dataset omits seasons in which players record no official statistics, creating challenges in representing injury-related absences and gap years. While this study addressed missing seasons through panel expansion, imputation, and explicit gap indicators, these approaches rely on modeling assumptions that may not fully capture the underlying mechanisms driving career interruptions.
+
+Second, injury data integration remains incomplete. Name-based matching and year alignment introduce unavoidable ambiguity, particularly for players with common names, mid-season team changes, or multiple injuries within a single year. As a result, injury severity was explored descriptively rather than fully incorporated as a causal predictor in the survival models. Future work would benefit from cleaner injury identifiers or official transaction-level data to improve match accuracy and temporal precision.
+
+Third, performance metrics such as wOBA and WAR are subject to historical inconsistencies, particularly for older seasons where certain statistics were not consistently recorded. Although care was taken to standardize calculations and avoid invalid values, residual measurement error likely remains. Additionally, pitchers were not fully filtered from all intermediate datasets, which may introduce noise into offensive performance measures for earlier eras.
+
+Fourth, the handling of the shortened 2020 MLB season. Two approaches were explored: removing the 2020 season entirely from the analysis, and scaling 2020 counting statistics to a 162-game equivalent. Neither approach proved fully satisfactory. Removing the season introduced artificial gaps in otherwise continuous careers and disrupted lagged performance variables, while scaling performance metrics implicitly assumed linear production over playing time, an assumption that is unlikely to hold given the unique conditions of the 2020 season. As a result, neither method was adopted in the final modeling framework. Properly accounting for the 2020 season likely requires a more nuanced approach, such as season-specific offsets, partial-season indicators, or hierarchical adjustments that explicitly model shortened-season effects. Further refinement of this component remains an important area for future work.
+
+Finally, the survival models estimate associations rather than causal effects. Retirement decisions are influenced by factors not captured in the data, including contract structures, organizational strategy, league-wide economic conditions, and personal considerations. Despite these limitations, the modeling framework developed in this study provides a flexible and interpretable foundation for analyzing aging and career longevity in professional baseball, and offers clear avenues for refinement as higher-quality data become available.
+
+## Conclusion and Further Research
+
+This report summarizes the progress made toward modeling age–performance curves and career longevity in Major League Baseball using a survival analysis framework. Over the course of the semester, a longitudinal player season dataset was constructed from the Lahman database and augmented to account for missing seasons, lagged performance, cumulative workload, and injury information. Exploratory analysis and model development demonstrated that retirement risk depends nonlinearly on age and is meaningfully shaped by recent performance, durability, and career usage, highlighting limitations of traditional static aging curves.
+
+The modeling framework developed here provides a flexible foundation for player level career projections and offers interpretable insights into how aging and workload interact over time. Remaining work will focus on refining injury integration, improving handling of the 2020 season, filtering pitchers more cleanly, and finalizing model specifications for the completed thesis. With these refinements, this thesis report is well-positioned to support a comprehensive analysis of how age-performance expectations in professional baseball have evolved in recent years.
+
+

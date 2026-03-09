@@ -1,0 +1,280 @@
+---
+title: "Data Exploration"
+author: "Avery Bishop"
+date: "2025-10-21"
+output: html_document
+---
+
+### LIBRARY LOADING/SETUP
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file()) #CHAT project root line
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(stringr)
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+```
+
+The above chunk loads the libraries used throughout this project. It also sets the project root to the correct project. I had some issues trying to fix the formatting in getting the correct project into the working directory, and I asked chatgpt to give me a knitr source line to ensure the current project root would be loaded when knitting the document. 
+
+
+### DATA LOADING/PRELIMINARY CLEANING
+
+This chunk below loads the injury dataset reproducibly as well as converts date strings across the addDate, endDate, and borndate columns into real date type values in R. This uses the as.Date function identifying the format in which the date srtings are printed, using mutate to rewrite the column variables on themselves, as well as giving a preview with the head function.
+
+```{r}
+injury_data <- read.csv("data/skripnikov_injured_list.csv")
+injury_data <- injury_data %>%
+  mutate(addDate = as.Date(addDate, format = "%m/%d/%Y")) %>%
+  mutate(endDate = as.Date(endDate, format = "%m/%d/%Y")) %>%
+  mutate(borndate = as.Date(borndate, format = "%m/%d/%Y"))
+
+head(injury_data)
+```
+
+### INITIAL DATA WRANGLING
+
+The initial data wrangling chunk filters the loaded injury dataset by level, identifying only MLB players, the population of interest. The chunk then filters out pitchers via all permutations of the pitcher-only position category, this was done by running a group by function in the console to determine all the different positional types, and then filtering out the ones that only reference pitchers that only pitched, keeping two-way players that also played another position (niche case). 
+
+```{r}
+#MLB posiiton players
+injury_data_MLB_pos_players <- injury_data %>%
+  filter(level == "MLB") %>%
+  filter(!posit %in% c("P", "RP", "SP", "p", "RP-SP", "SP-RP", "P "))
+```
+
+The following chunk was the initial checks into whether or not the 40man roster designation was a meaningful category to be included or not. As the following code suggests, there are many cases where an MLB player was injured whilst also not being on the 40man roster. Further research informed that players do not have to be a part of the 40man roster in order to play in the MLB, whether that be due to September callups, injury fillings, or other individual cases. 
+
+```{r}
+#Checking for if 40 man designation coincide with MLB roster
+sum(is.na(injury_data_MLB_pos_players))
+sum(injury_data_MLB_pos_players$X40man == "N")
+
+#Dont have to be on the 40 man to be in the MLB, injury replacements as well as September Call-ups count
+```
+
+The following code also shows that there are 141 players that have a team listed in the minorteam column, which upon further investigation, seem to have their full Major League team listed in the minorteam category. Upon further questioning with TBC, they had been moved into a Major League team at that time, and are not trivial for the overall data congruency.
+
+```{r}
+
+sum(!injury_data_MLB_pos_players$minorteam == "-")
+
+head(injury_data_MLB_pos_players)
+nrow(injury_data_MLB_pos_players)
+str(injury_data_MLB_pos_players)
+summary(injury_data_MLB_pos_players)
+```
+
+### Injury Designation 
+
+The following chunk dives into what designations the status column holds and what the HINJ designation defines. First, looking across the different designations the data holds for injury status, and then inspecting the HINJ entries for the most recent record using arrange and slice_head. This is to confirm whether HINJ represents older historical data which it does not via Allen Cordoba in 2018. I then find there are 5564 HINJ listings in my data, more than any other designation. 
+
+
+```{r}
+unique(injury_data_MLB_pos_players$status)
+
+#Wanted to check what HINJ meant if it just meant older data, but this proves it isn't
+injury_data_MLB_pos_players %>%
+ filter(status == "HINJ") %>%
+ arrange(desc(addDate)) %>%
+ slice_head(n = 1)
+#IMPORTANT NOTE: Around 2017, MLB adjusted the disabled list (renamed “Injured List”) rules — the 15-day DL became 10 days
+#Checking in notes for all HINJ listings if there is a length in notes section
+sum(injury_data_MLB_pos_players$status == "HINJ")
+
+```
+
+Next, checking the notes field to see if there is explicit information about the disabled list or injured list duration within HINJ listings using str_detect with a regular expression. This was in an effort to confirm that the HINJ listing was not just for players with an unlisted length on any injury designation list. I used chat to write the string detection character lines for the notes section. I used summarise to group the count_true and sum those, which there was one. Then filtering for this value, we find that Eric Young was listed as HINJ even though in his notes section it says DL-15, which nullifies the assumption that HINJ was just for non-length designated injuries. Upon further questioning with baseball cube, their answer was " HINJ = historical injury. Meaning I didn't capture it in realtime with the DL/IL type". This answer is nonsensical with the Eric Young row, which upon further questioning was lead to believe this was just a mistake by the creator of the dataset.  
+
+```{r}
+
+hinj_check <- injury_data_MLB_pos_players %>%
+  filter(status == "HINJ") %>%
+  mutate(dl_il_in_notes = str_detect(notes, "DL-[0-9]+|IL-[0-9]+")) #CHAT wrote the string detection character lines
+hinj_check %>%
+  summarise(count_true = sum(dl_il_in_notes),
+            count_false = sum(!dl_il_in_notes))
+hinj_check %>%
+  filter(dl_il_in_notes == TRUE)
+#At least one exception to my unknown length rule for HINJ
+
+```
+
+### PLOTTING
+
+The following status plot demonstrates the importance of understanding the HINJ designation via the status distribution, highlighting the sheer volume of observations with HINJ listed. 
+
+```{r}
+ggplot(data = injury_data_MLB_pos_players, aes(x = status)) +
+  geom_bar(fill = "blue") +
+  labs(x = "Injury Status", y = "Frequeny") 
+```
+
+The following code is the plotting introduction of injury severity by creating the missed_time variable by taking the endDate-addDate, previewing the longest missed_time. This preview as well as the following plot alerted the fact that current injured players that are still designated have "9999-12-31" listed as their enDate, skewing the distribution plots. To fix this, I filtered out this specific endDate and plotted the rest of the players who have concluded their injured list stay. 
+
+```{r}
+#Create missed time variable
+injury_data_MLB_pos_players <- injury_data_MLB_pos_players %>%
+  mutate(missed_time = as.numeric(endDate - addDate))
+
+injury_data_MLB_pos_players %>%
+  arrange(desc(missed_time)) %>%
+  select(lastname, firstname, teamname, addDate, endDate, missed_time) %>%
+  head()
+
+#Take out current IL/DL players
+injury_data_MLB_pos_players_plot <- injury_data_MLB_pos_players %>%
+  filter(endDate != "9999-12-31")
+
+ggplot(injury_data_MLB_pos_players_plot, aes(x = addDate, y = missed_time)) +
+  geom_point() +
+  labs(x = "Dates", y = "Missed Time")
+
+```
+
+### Further missed_time unreliability
+
+To further test this missed_time variable, I ran the summary which alerted me to the fact that it has a minimum of 0 missed days, to which I went and filtered for to see that 16 players in my data set have the same add and end dates. Upon further questioning with baseball cube to figure out how the endDate variable works, their answer was "The 'endDate' should be the 'activated from DL' value. IT should refer to when the player is no longer on the injured list. The injury itself is not tracked. More like the roster status related to the injury". Under these definitions, I determined that trying to pull a quantitative observation from the dates listed would not be reliable, and instead opted to go with qualitative categorization. 
+
+```{r}
+summary(injury_data_MLB_pos_players_plot$missed_time)
+
+enddating_wrong <- injury_data_MLB_pos_players_plot %>%
+    filter(missed_time == 0) %>%
+    select(lastname, firstname, notes, status, addDate, endDate, missed_time)
+head(enddating_wrong)
+nrow(enddating_wrong)
+```
+
+
+### Severity Designation
+
+In order to create a severity designation for modeling purposes, this classify_severity function was written using these different term vectors, severe, moderate, and minor, and checking each notes section using str_detect for any of these terms to categorize each injury. These vector lists of injury terms were made by scrolling through the notes section of the data and classifying key terms from each injury listing and categorizing them into one of the vectors. This also took into account multiple spelling mistakes like "brokem", "surger", "fratured", etc. Most of the unknown listings contain notes sections that consist of things like "DL-60 Injured", "DL-7 Unknown", "DL-15 Left wrist", etc. however further cleaning is definitely still called for. I had chat help write the regex collapse of the vectors of terms, as well as having to vectorize the output of the written function to apply to the data set. the following code previews this new column called injury_severity. 
+
+```{r}
+severe_terms <- c(
+  "torn", "tear", "acl", "mcl", "pcl", "ulnar", "tommy john",
+  "labrum", "fracture", "broken", "rupture", "surgery", 
+  "dislocation", "out for season", "season-ending", "dislocated", "subluxation", "turf toe", "plantar fasciitis", "separation", "separated", "herniated disk", "surger", "bone spur", "kidney stone", "fratured", "fractured", "cracked", "herniated discs", "protrusion", "spur", "collapsed lung", "severe", "hematoma", "traumatic", "crack", "clot", "blood clot", "cancer", "hernia", "irregular heartbeat", "appendectomy", "appendicitis", "joint dysfunction", "brokem", "substance", "abuse", "tumor", "spinal fusion", "cartilage damage", "frecture", "bone chips"
+)
+moderate_terms <- c(
+  "strain", "hamstring", "groin", "oblique", "sprain",
+  "concussion", "inflammation", "tightness", "tendinitis",
+  "spasms", "displaced", "infection", "swelling", "impingement", "laceration", "disorder", "hyperextended", "bulging", "tennis elbow", "cyst", "scratched cornea", "disc", "inflammation", "bursitis", "cellulitis", "lacerated", "tendonitis", "swollen", "hyperextension", "inflamed", "hyper-extended", "infected", "spasm"
+  
+)
+minor_terms <- c(
+  "sore", "soreness", "fatigue", "bruised", "contusion",
+  "day-to-day", "illness", "flu", "virus", "rest", "issues", "discomfort", "stiffness", "jammed", "irritation", "bruise", "pinched nerve", "twist", "stress reaction", "pain", "vertigo", "migraines", "tenderness", "bunion", "COVID-19", "covid", "pulled", "lesion", "pinched", "pull", "stiff", "aggravated", "shin splints", "stress"
+)
+
+#had to look up the regex collapse logic in order to search any across str_detect in my vector
+classify_severity <- function(note) {
+  
+  if (is.na(note)) return("unknown")
+  
+  if (str_detect(note, regex(str_c(severe_terms, collapse="|"), ignore_case = TRUE))) {
+    return("severe")
+  }
+  
+  if (str_detect(note, regex(str_c(moderate_terms, collapse="|"), ignore_case = TRUE))) {
+    return("moderate")
+  }
+  
+  if (str_detect(note, regex(str_c(minor_terms, collapse="|"), ignore_case = TRUE))) {
+    return("minor")
+  }
+  
+  return("unknown")
+}
+
+#had to look up why I couldn't run without vectorizing the output:
+classify_severity_vec <- Vectorize(classify_severity)
+
+injury_classified <- injury_data_MLB_pos_players %>%
+  mutate(
+    injury_severity = classify_severity_vec(notes)
+  )
+
+injury_classified %>% 
+  count(injury_severity)
+
+head(injury_classified)
+
+```
+
+### Handling unknowns
+
+The following code chunk helped me sift through the unknown notes designations in order to build the term list (commented out), as well as the plot of the injury severity distribution across categories. 
+
+```{r}
+# injury_classified %>%
+#   filter(injury_severity == "unknown") %>%
+#   select(notes, injury_severity, status)
+
+ggplot(data = injury_classified, aes(x = injury_severity)) +
+  geom_bar()
+
+```
+
+### Joining to modeling data 
+
+The following chunk attempts to join my injury dataset across to my Lahman baseball statistics data set, built and augmented through R for my thesis research specifically for modeling. This is loaded in an RDS file through R and read as such using readRDS (Chat help to figure out how to load RDS). I then adjusted the injury dataset to be set to merge by lower casing both first and last names, as well as pulling the year out of bornDate in order to match it to the Lahman data as well as injury year to match it to the yearID. I also select the columns I want merged from the injury dataset as well. The Lahman data is then adjusted lowercasing the name columns as well to make it more reliable in matching. The data sets are then joined by first and last name as well as both injury year and born year to get around rows with the same first and last name. Left_join was chosen because the entirety of the Lahman data should be kept for modeling purposes down the road, obviously the ultimate goal involves years without injury to model. Specifically for the left_join, it is not overall expected to drop non-matching rows, however the many-to-many warning is to signify the instances where a player is injured and switched teams during said season. If a player records hitting statistics across two different teams they are logged in Lahman as two separate rows, hence the many-to-many warning when a player is matched across different rows. The same happens inversely when a player goes on the injury list twice in the same season, matching multiple rows from the injury dataset to a row from the Lahman. There is still cleaning to be done when using this join especially handling the N/A's and how Lahman handles missing seasons, but this is the quickest and easiest way to handle said join currently giving me meaningful plots before I can clean them in depth and fix all of the matches specifically. 
+
+```{r}
+survival_data_model2 <- readRDS("data/survival_data_model2.rds")
+
+injury_merge <- injury_classified %>%
+  mutate(
+    firstname = str_to_lower(firstname),
+    lastname  = str_to_lower(lastname), 
+    injury_year = year(addDate),
+    bornyear = year(borndate)) %>%
+  select(firstname, lastname, injury_year, bornyear, status, notes, addDate, X40man, endDate, minorteam, level, injury_severity)
+
+modeling_data <- survival_data_model2 %>%
+  mutate(nameFirst = str_to_lower(nameFirst), 
+         nameLast = str_to_lower(nameLast))
+
+#trying to join by birthyear as well do get around people with the same name
+model_injury <- modeling_data %>%
+  left_join(injury_merge, by = c("nameFirst" = "firstname", "nameLast" = "lastname", "yearID" = "injury_year", "birthYear" = "bornyear"))
+
+head(model_injury)
+
+```
+
+
+
+
+### Injury Severity by Year
+
+In order to single out injury_severity by year, I had to filter out values that didn't include an injury (the rest of the rows from Lahman), and then plot injury_severity by yearID. A stacked bar chart is used to show the distribution of severities per year, as well as all injuries reported overall. The skewness of the distribution is most likely due to the bias of overall observations, more injuries being reported in recent years as now they are mandatory to be reported to the league, versus in older years when it was more of a formality of reporting.
+
+```{r}
+#make the model meaningful without the thousands of na for seasons w/out injury
+model_plot <- model_injury %>%
+  filter(!is.na(injury_severity))
+
+ggplot(model_plot, aes(x = yearID, fill = injury_severity)) +
+  geom_bar(position = "stack") +
+  labs(title = "Injury Severity by Year", x = "Season", y = "Count") 
+
+```
+
+### Injury Severity by Age
+
+In plotting injury severity by age, the calculated age column from Lahman allows us to see a distribution of injury severity and overall count by player age. 
+
+```{r}
+ggplot(model_plot, aes(x = age, fill = injury_severity)) +
+  geom_histogram(position = "stack") +
+  labs(title = "Injury Severity by Age", x = "Player Age", y = "Count") 
+
+```
+

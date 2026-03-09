@@ -1,0 +1,118 @@
+survival_data_model2 <- survival_data_model %>%
+  arrange(playerID, yearID) %>%
+  group_by(playerID) %>%
+  mutate(
+    years_in_league = row_number() - 1,   # 0, 1, 2, ...
+    start = years_in_league,
+    stop  = years_in_league + 1
+  ) %>%
+  mutate(
+    #lag_wOBA = lag(wOBA, 1),
+    #lag_PA   = lag(PA, 1),
+    #lag_G    = lag(G, 1),
+    career_PA = cumsum(lag(PA, default = 0)),
+    career_G  = cumsum(lag(G, default = 0)),
+    career_wOBA = ifelse(career_PA > 0,
+                         cumsum(lag(wOBA * PA, default = 0)) / pmax(career_PA, 1),
+                         NA_real_),
+    wOBA_rolling3 = zoo::rollapply(lag(wOBA, 1), width = 3,
+                                   FUN = mean, align = "right", fill = NA)
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(lag_wOBA))
+
+# ================================
+# 2. FIT COX MODEL
+# ================================
+
+fit_cox <- coxph(
+  Surv(start, stop, event) ~ 
+    ns(age, df = 3) + 
+    lag_wOBA + lag_PA + lag_G + age*career_PA,
+  data = survival_data_model2
+)
+
+summary(fit_cox)
+cox.zph(fit_cox)  # check proportional hazards
+
+# ================================
+# 3. EXPECTED SURVIVAL TIME FUNCTION
+# ================================
+
+expected_survival_time <- function(surv_obj, max_quantile = 0.95) {
+  times <- surv_obj$time
+  surv  <- surv_obj$surv
+  if(length(times) < 2) return(0)
+  max_time <- quantile(times, probs = max_quantile, na.rm = TRUE)
+  idx <- which(times <= max_time)
+  if(length(idx) < 2) return(0)
+  times_sub <- times[idx]
+  surv_sub  <- surv[idx]
+  dt <- diff(c(0, times_sub))
+  auc <- sum(surv_sub * dt)
+  return(auc)
+}
+
+# ================================
+# 4. PREDICT FOR MULTIPLE PLAYERS
+# ================================
+
+players_to_plot <- c("aaronha01", "mayswi01", "troutmi01", "alonspe01", "forsylo01")  
+player_id = "troutmi01"
+for (player_id in players_to_plot) {
+  
+  cat("\n\n====================\n")
+  cat("Generating plots for:", player_id, "\n")
+  cat("====================\n")
+  
+  player_data <- survival_data_model2 %>%
+    filter(playerID == player_id) %>%
+    arrange(start) %>%
+    slice(-1)
+  
+  if (nrow(player_data) == 0) {
+    cat("No data found for", player_id, "\n")
+    next
+  }
+  
+  expected_remaining <- sapply(1:nrow(player_data), function(i) {
+    newrow <- player_data[i, , drop = FALSE]
+    sf <- survfit(fit_cox, newdata = newrow)
+    est <- expected_survival_time(sf)
+    est
+  })
+  
+  predicted_retirement_age <- player_data$age + expected_remaining
+  
+  results <- data.frame(
+    season_index = 1:nrow(player_data),
+    season = player_data$yearID,
+    current_age = player_data$age,
+    expected_remaining = expected_remaining,
+    predicted_retirement_age = predicted_retirement_age
+  )
+  
+  # ================================
+  # 5. PLOTS (same as your code)
+  # ================================
+  
+  # --- Predicted retirement age vs. current age ---
+  plot(results$current_age, results$predicted_retirement_age,
+       type = "b", pch = 19, col = "skyblue",
+       xlab = "Current Age",
+       ylab = "Predicted Retirement Age",
+       main = paste("Predicted Retirement Age vs Current Age for", player_id))
+  abline(0, 1, col = "red", lty = 2)
+  text(results$current_age, results$predicted_retirement_age + 0.3,
+       labels = round(results$expected_remaining, 1), cex = 0.7)
+  
+  # --- Expected years remaining (barplot) ---
+  barplot(results$expected_remaining,
+          names.arg = round(results$current_age, 0),
+          las = 2,
+          col = "skyblue",
+          main = paste("Predicted Remaining Career Length by Season for", player_id),
+          xlab = "Current Age",
+          ylab = "Expected Seasons Remaining")
+  abline(h = 0, col = "red", lty = 2)
+}

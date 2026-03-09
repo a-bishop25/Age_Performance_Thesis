@@ -1,0 +1,129 @@
+# ---- Build survival model structure ----
+survival_data_model2 <- Batting %>%
+  arrange(playerID, yearID) %>%
+  group_by(playerID) %>%
+  mutate(
+    years_in_league = row_number() - 1,  # start counting at 0
+    start = years_in_league,
+    stop  = years_in_league + 1,
+    
+    # Lag and cumulative stats
+    lag_wOBA = lag(wOBA, 1),
+    lag_PA   = lag(PA, 1),
+    lag_G    = lag(G, 1),
+    
+    career_PA = cumsum(lag(PA, default = 0)),
+    career_G  = cumsum(lag(G, default = 0)),
+
+    # Flag final available year
+    event = if_else(row_number() == n(), 1, 0),
+    
+    # Flag gap years
+    missed_prev_year = if_else(yearID - lag(yearID, default = first(yearID)) > 1, 1, 0)
+  ) %>%
+  ungroup()
+
+# # Replace NA wOBA with 0 only for modeling stability
+# survival_data_model2 <- survival_data_model2 %>%
+#   mutate(
+#     wOBA = ifelse(is.na(wOBA), 0, wOBA)
+#   )
+
+glimpse(survival_data_model2)
+
+# ================================
+# 1. FIT COX MODEL (same as before)
+# ================================
+
+fit_cox <- coxph(
+  Surv(start, stop, event) ~ 
+    ns(age, df = 3) +
+    lag_wOBA + lag_PA + lag_G + age*career_PA,
+  data = survival_data_model2
+)
+
+summary(fit_cox)
+
+# ================================
+# 2. HELPER FUNCTION
+# ================================
+expected_survival_time <- function(surv_obj, max_quantile = 0.95) {
+  times <- surv_obj$time
+  surv  <- surv_obj$surv
+  if(length(times) < 2) return(0)
+  max_time <- quantile(times, probs = max_quantile, na.rm = TRUE)
+  idx <- which(times <= max_time)
+  if(length(idx) < 2) return(0)
+  times_sub <- times[idx]
+  surv_sub  <- surv[idx]
+  dt <- diff(c(0, times_sub))
+  auc <- sum(surv_sub * dt)
+  return(auc)
+}
+
+# ================================
+# 3. PREDICT AND PLOT (with NA-safe handling)
+# ================================
+
+players_to_plot <- c("aaronha01", "mayswi01", "troutmi01", "alonspe01")
+
+for (player_id in players_to_plot) {
+  
+  cat("\n\n====================\n")
+  cat("Generating plots for:", player_id, "\n")
+  cat("====================\n")
+  
+  player_data <- survival_data_model2 %>%
+    filter(playerID == player_id) %>%
+    arrange(start)
+  
+  if (nrow(player_data) == 0) {
+    cat("No data found for", player_id, "\n")
+    next
+  }
+
+  # --- Replace NA predictors with safe defaults ---
+  # player_data <- player_data %>%
+  #   mutate(
+  #     lag_wOBA = ifelse(is.na(lag_wOBA), 0, lag_wOBA),
+  #     lag_PA   = ifelse(is.na(lag_PA), 0, lag_PA),
+  #     lag_G    = ifelse(is.na(lag_G), 0, lag_G),
+  #     career_PA = ifelse(is.na(career_PA), 0, career_PA),
+  #     missed_prev_year = ifelse(is.na(missed_prev_year), 0, missed_prev_year)
+  #   )
+  # 
+  expected_remaining <- sapply(1:nrow(player_data), function(i) {
+    newrow <- player_data[i, , drop = FALSE]
+    sf <- tryCatch(
+      survfit(fit_cox, newdata = newrow),
+      error = function(e) return(NULL)
+    )
+    if (is.null(sf)) return(0)
+    expected_survival_time(sf)
+  })
+  
+  predicted_retirement_age <- player_data$yearID + expected_remaining
+  
+  results <- data.frame(
+    season_index = 1:nrow(player_data),
+    season = player_data$yearID,
+    expected_remaining = expected_remaining,
+    predicted_retirement_age = predicted_retirement_age,
+    missed_prev_year = player_data$missed_prev_year
+  )
+  
+  # --- PLOTS ---
+  bar_cols <- ifelse(results$missed_prev_year == 1, "tomato", "skyblue")
+  
+  barplot(results$expected_remaining,
+          names.arg = results$season,
+          las = 2,
+          col = bar_cols,
+          main = paste("Predicted Remaining Career Length by Season for", player_id),
+          xlab = "Season (Year)",
+          ylab = "Expected Seasons Remaining")
+  abline(h = 0, col = "red", lty = 2)
+  
+  legend("topright", legend = c("Normal Season", "Missed Prior Year"),
+         fill = c("skyblue", "tomato"), bty = "n")
+}

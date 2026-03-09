@@ -1,0 +1,93 @@
+---
+title: "Data Story"
+author: "Avery Bishop"
+date: "2025-11-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(stringr)
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+
+source("setup_objects.R")
+```
+
+# Data Story
+
+## Intro
+
+This project focuses on producing conducive information for injury data of Major League Baseball position players using the Baseball Cube injury data set for an Age-Performance Curve Thesis. The basis for this thesis is trying to create an accurate predicative model for age-performance around the league, as well as analyzing the age-performance metrics for the players and possibly understanding the time-series changes for age-performance as baseball evolves. This project specifically is trying to produce injury information for the MLB in order to accurately model and predict how injuries will and have affected performance over a career and how they will affect an overall age-performance model.
+
+## Computing Summary
+
+Some of the biggest obstacles that I faced initially when handling this data was just how non-uniform it truly was, a lot of rows tried to convey the same things but did it in different characters. This applied not only to the position cleaning, but really became a big portion of the project when I delved into the notes sections of the project. Obviously the ambiguity of how some of the columns are determined is still something I am dealing with and have reached out to the makers of the data set in order to figure some of these things out, however just how some of the key values are inputted took a lot of refining once I began working in depth with the data set. These include how positions are defined, how the status column is defined in HINJ, how the notes section defines certain injuries and designation lengths, many different expressions of injuries as well as many instances of misspellings in the injury notes. Some of the coding concepts I particularly refined throughout this project first and foremost are the limitations and implications of functions like filter, mutate, and group by in order to perform my initial data refining and then later to create a join-able data set as well. Some more foreign concepts to me that I had to employ when carrying out this project are the regex checks for things like the numeric distinction in the notes section, and the applying of the severity function to check for a vector of characters in the notes section using str_detect. The join statements I was somewhat familiar with from other coding experience in different languages such as SQL, but it was definitely tricky when trying to employ date of birth as one of the joining keys in order to get around the mismatches across people with the same first and last names. Some of the ggplot code started to trip me up when looking at positions and stats, however they were the best choices especially when stacking observations for something like a bar charts with different colors discerning the different categories of severity.
+
+## Data Story
+
+When I first looked at the injury data for MLB position players, one of the things that immediately stood out was the distribution of injury designations, especially when I knew down the line the goal with this data set was to incorporate severity. Teams categorize injured players in a bunch of ways, things like IL10, IL60, D15, and so on. But the most common designation by far was HINJ, which was a little surprising at first. I had assumed it might just represent older or historical cases, but it clearly pops up a lot even alongside more specific categories like IL10 or D15. This made me realize pretty quickly that understanding what HINJ really means was going to be important for interpreting the rest of the data.
+
+### Status Distribution
+
+```{r}
+unique(injury_data_MLB_pos_players$status)
+
+ggplot(data = injury_data_MLB_pos_players, aes(x = status)) +
+  geom_bar(fill = "blue") +
+  labs(x = "Injury Status", y = "Frequeny") 
+```
+
+This distribution highlights the disparity in injury statuses, with frequency of status on the Y and the different status designations on the X. HINJ dominates the status column distribution, and after further investigation with the baseball cube creator, his answer was that "HINJ = historical injury. Meaning I didn't capture it in real time with the DL/IL type." I have an instance of this being false, with Eric Young containing DL-15 in the notes section, along with only one other instance via the 60 day IL, and what my thesis professor and I came up with is that these two contained instances were simply errors with TBC's recording that aren't trivial in overall modeling. With that said, our best interpretation of HINJ is that it is a historical injury that was not recorded with a DL/IL designation.
+
+### Missed Time Scatter Plot
+
+Next, I started exploring how long players actually spend on the injured list. I created a variable called missed_time to track the duration of each injury. Plotting it over time didn’t reveal a neat linear trend, but one thing became apparent, injuries lasting over 200 days started showing up more frequently around 2012. At first, I wasn’t sure why, but thinking about it, there are a few possibilities. Maybe medical advances were allowing players to come back from injuries that would’ve ended their careers in earlier years. Or maybe teams were just being more cautious with star players who have big contracts. And then there’s the game itself, how it’s played, how much strain it puts on players today versus a decade ago, it’s probably a mix of all those factors. Of course, the exact numbers are a bit tricky, because the endDate in the data set doesn’t always clearly indicate whether it’s when a player actually returned to the field, when they were taken off the list, or when their season ended. So while missed_time gives a good general sense, it’s not perfectly precise in giving a injury severity metric.
+
+```{r}
+ggplot(injury_data_MLB_pos_players_plot, aes(x = addDate, y = missed_time)) +
+  geom_point() +
+  labs(x = "Dates", y = "Missed Time")
+```
+
+The plot above is a simple scatterplot of total days missed due to injury, simply by taking the addDate - endDate stored in our missed_time variable. This total of days is plotted on the Y, while the Dates ordered from the 1950's to 2024 is plotted on the X. There are a lot of points that fall under the same general trend, centered at lower values of the missed_time variable (0-50 days), with higher end values centering around 200. However, as seen in the plot, once the year hits 2012, there seems to be an extension of the data spanning past the 200 day "ceiling" that had stood for the first 50 ish years of baseball. The highest value is Andrew Cain with 373 days missed, the notes section delineating that he was on "Disabled list for 2014 season".
+
+### Injury Severity
+
+Because of the uncertainties surrounding endDate, I decided to take another approach and look at injury severity more qualitatively. Instead of just relying on how long someone was on the list, I went through the notes field in the data set and created a system to classify injuries as severe, moderate, minor, or unknown based on descriptive keywords. This way, each injury got a label that could actually be useful for later analysis and modeling. Once I merged this severity information back into my main data set, I could start visualizing trends across years and player ages. Looking at the severity over time, one thing that jumped out was that more recent years had more recorded injuries in general. That makes sense, data collection is much more consistent now, and teams keep more detailed records than they used to. Moderate injuries were the most common category, which also feels intuitive, while minor injuries have been appearing a bit more in very recent seasons. When I looked at injury severity by age, the distribution looked roughly normal. Different severities tended to follow similar patterns, which was interesting, suggesting that injuries of all kinds affect players across ages in a fairly consistent way.
+
+```{r, warning=FALSE, message=FALSE}
+ggplot(model_plot, aes(x = yearID, fill = injury_severity)) +
+  geom_bar(position = "stack") +
+  labs(title = "Injury Severity by Year", x = "Season", y = "Count") 
+
+ggplot(model_plot, aes(x = age, fill = injury_severity)) +
+  geom_histogram(position = "stack") +
+  labs(title = "Injury Severity by Age", x = "Player Age", y = "Count") 
+```
+
+The Injury Severity by Year plots total count of injuries on the Y with the season year on the X. This is done using a stacked bar chart, in order to delineate injury count and injury type on the same graph indexing by individual year. This obviously gives a cone shaped distribution highlighting the increased number of observations of injury per year, with an increased proportion of minor and severe injuries in more recent years.
+
+The Injury Severity by Age plots a distribution with injury count on Y and player age on the X. The plot is a stacked histogram that displays the distribution of injuries per each Age of a player in their career. The stack allows for the visual capture of each injury severity count per age as well. The distribution is roughly normal, with proportions of severity roughly following that normal distributions as well. It is also curious that the peak of injury count occurs at age 28, which is typically the age of ones physical prime in the baseball realm. Some theoretical explanations for this would be the peak in workload, players are typically no longer prospects so for the first time in their lives they are expected to play a full 162 games in a season that matter. Although it is their peak performance age, it is also their peak expectation so usage would be at an all time high. They are expected to play at a high intensity at all times due to that peak age, therefore inviting the higher risk of injury. It would also make theoretical sense for older players injury quantities to drop off due to the fact that as players get injured at older ages, their risk of dropping out of the league is significantly higher, making the population of older players much slimmer and therefore less total observations.
+
+## Key Takeaways
+
+Overall, there are a few takeaways that really stood out. First, moderate injuries dominate the MLB injury landscape, but HINJ captures a huge portion of historical or ambiguous cases, which is something to keep in mind when interpreting totals. Second, long-term injuries seem to have become more common in recent years, which might reflect medical progress, more conservative return timelines, or just how the game has evolved physically. Third, injury patterns by age show a fairly steady trend, meaning severity doesn’t spike dramatically at any particular stage of a player’s career. And finally, the majority of injury data circulates around ages 26-29, which makes intuitive sense behind being ones peak physical age also driving ones workload and risk of injury to their peaks along with it. One of the biggest lessons for me, though, was just how tricky it is to work with real-world data. Even something as seemingly straightforward as an injury start or end date can be ambiguous, and that ambiguity can change how you interpret everything else. But despite the quirks, these results paint a clearer picture of how injuries have changed over time in MLB and give a sense of the broader patterns across player careers, crucial to my overall age-performance thesis.
+
+# SOURCES
+
+-   The Baseball Cube. “Injured List History (Pro Baseball).” <https://www.thebaseballcube.com/content/store/injured-list-history-pro/> Accessed December 8, 2025.
+
+-   OpenAI. “ChatGPT Response to User Query.” Personal communication. Conversation on December 8, 2025.
+
+-   Lahman Baseball Database. “Baseball Statistics Database.” <https://www.seanlahman.com/baseball-archive/statistics/>. Accessed December 8, 2025.
+
+-   Baseball-Reference. “Major League Baseball Statistics and History.” <https://www.baseball-reference.com/>. Accessed December 8, 2025.
+
+-   FanGraphs. “FanGraphs Baseball Statistics and Analysis.” <https://www.fangraphs.com/>. Accessed December 8, 2025.
+
+-   FanGraphs Blogs. Selected articles used for methodological background and baseball injury context. <https://blogs.fangraphs.com/>. Accessed December 8, 2025.

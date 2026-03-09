@@ -1,0 +1,13 @@
+---
+title: "01ProjectResults"
+author: "Avery Bishop"
+date: "2025-11-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#Data Story
+
+  This project is mainly focued on producing condusive information for injury data of Major League Baseball position players using the Baseball Cube injury dataset for my Age-Performance Curve Thesis specifically for Major League position players. The basis for this project is trying to create a an accurate predicative model for age-performance around the league, as well as analyzing the age-performance metrics for the league and possibly understanding the time-series changes for age-performance as baseball evolves. This project specifically is trying to produce injury information for the league in order to accurately model and predict how injuries will and have affected performance over a career and how they affect an overall age-performance model. My primary graphs thus far include a bar graph of each injury designation, which slots the HINJ designation as having the most instances by far, followed by IL10, D15, D10, D7, IL7, IL60, and then D60 with the lowest amount. This alerted me to the importance of the HINJ designation as well as trying to figure out exactly what it means. My second plot intorduces the missed_time variable, which basically gives the total time spent with a designation for that specific injury, plotted into a scatterplot with the X axis simply representing the time series at which it happenend. This was in an effort to see if the time spent on an injury list has trended a certain direction over time, to which I was then alerted to how the endDate was handled in the data set. Overall, there wasn't any easy linear correlations, however there was a noticeable difference in long term injuries plotted in missed_time becoming more common circa 2012, specifically injuries that spanned over 200 days. Possible reasons for this may be due to advancements in medical technology allowing for people to actually return from longer-term injuries instead of their careers being ended, more conservative return timelines for major league players that have locked in bigger contracts in recent years, and just shifts in how the game is played and the increased stress that comes with how to the game has evolved. 
